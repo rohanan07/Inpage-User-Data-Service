@@ -38,64 +38,219 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'UP', service: 'user-data-service' });
 });
 
-// 🔹 POST /words: Save a list of words for a specific page
-app.post('/userdata/words', async (req, res) => {
-  const { bookId, pageNumber, words } = req.body;
+
+app.post('/userdata/profile', async (req, res) => {
+  const { userLevel } = req.body;
   const userId = req.user.id;
 
-  // Basic Validation
-  if (!bookId || !pageNumber || !words || !Array.isArray(words)) {
-    return res.status(400).json({ error: "Invalid payload. Required: bookId, pageNumber, words[]" });
-  }
-
-  if (userId === 'anonymous') {
-    return res.status(401).json({ error: "Unauthorized. Missing x-user-id header." });
+  if (![1,2,3].includes(userLevel)) {
+    return res.status(400).json({ error: "userLevel must be 1, 2, or 3" });
   }
 
   try {
-    console.log(`[user-data] Saving ${words.length} words for User: ${userId}, Book: ${bookId}`);
+    await dynamo.send(new PutCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        userId,
+        sk: "PROFILE",
+        entityType: "PROFILE",
+        userLevel,
+        updatedAt: Date.now()
+      }
+    }));
 
-    // Map each word to a DynamoDB Put Promise
-    const savePromises = words.map(wordItem => {
-      
-      // Construct the Sort Key (SK)
-      // Pattern: BOOK#<id>#PAGE#<num>#WORD#<word>
-      // This groups data by Book -> Page -> Word automatically
-      const sk = `BOOK#${bookId}#PAGE#${pageNumber}#WORD#${wordItem.word}`;
+    res.status(200).json({ message: "Profile updated", userLevel });
 
-      const command = new PutCommand({
-        TableName: TABLE_NAME,
-        Item: {
-          userId: userId,             // Partition Key
-          sk: sk,                     // Sort Key
-          
-          // Data Attributes
-          bookId: bookId,
-          pageNumber: pageNumber,
-          word: wordItem.word,
-          meaning: wordItem.meaning,
-          example: wordItem.example,
-          createdAt: Date.now()
-        }
-      });
-
-      return dynamo.send(command);
-    });
-
-    // Execute all writes in parallel
-    await Promise.all(savePromises);
-
-    return res.status(201).json({
-      message: `Successfully saved ${words.length} words`,
-      bookId,
-      pageNumber
-    });
-
-  } catch (error) {
-    console.error('[user-data] Error saving words:', error);
-    return res.status(500).json({ error: "Failed to save words to database" });
+  } catch (err) {
+    console.error("Profile update error:", err);
+    res.status(500).json({ error: "Failed to update profile" });
   }
 });
+
+app.get('/userdata/profile', async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const result = await dynamo.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: "userId = :uid AND sk = :sk",
+      ExpressionAttributeValues: {
+        ":uid": userId,
+        ":sk": "PROFILE"
+      }
+    }));
+
+    const profile = result.Items?.[0];
+
+    res.json({
+      userLevel: profile?.userLevel
+    });
+
+  } catch (err) {
+    console.error("Profile fetch error:", err);
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});
+
+
+// 🔹 POST /userdata/books → Create Book
+app.post('/userdata/books', async (req, res) => {
+  const { bookId, title } = req.body;
+  const userId = req.user.id;
+
+  if (!bookId || !title) {
+    return res.status(400).json({ error: "bookId and title required" });
+  }
+
+  try {
+    const sk = `BOOK#${bookId}`;
+
+    await dynamo.send(new PutCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        userId,
+        sk,
+        entityType: "BOOK",
+        bookId,
+        title,
+        createdAt: Date.now()
+      }
+    }));
+
+    res.status(201).json({ message: "Book created", bookId });
+
+  } catch (err) {
+    console.error("Create Book Error:", err);
+    res.status(500).json({ error: "Failed to create book" });
+  }
+});
+
+
+// 🔹 GET /userdata/books → List Books
+app.get('/userdata/books', async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const result = await dynamo.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: "userId = :uid AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: {
+        ":uid": userId,
+        ":prefix": "BOOK#"
+      }
+    }));
+
+    res.json({ books: result.Items || [] });
+
+  } catch (err) {
+    console.error("List Books Error:", err);
+    res.status(500).json({ error: "Failed to fetch books" });
+  }
+});
+
+
+// 🔹 POST /userdata/books/:bookId/pages → Create Page
+app.post('/userdata/books/:bookId/pages', async (req, res) => {
+  const { bookId } = req.params;
+  const { pageNumber } = req.body;
+  const userId = req.user.id;
+
+  if (!pageNumber) {
+    return res.status(400).json({ error: "pageNumber required" });
+  }
+
+  try {
+    const sk = `BOOK#${bookId}#PAGE#${pageNumber}`;
+
+    await dynamo.send(new PutCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        userId,
+        sk,
+        entityType: "PAGE",
+        bookId,
+        pageNumber,
+        createdAt: Date.now()
+      }
+    }));
+
+    res.status(201).json({ message: "Page created", pageNumber });
+
+  } catch (err) {
+    console.error("Create Page Error:", err);
+    res.status(500).json({ error: "Failed to create page" });
+  }
+});
+
+
+// 🔹 GET /userdata/books/:bookId/pages → List Pages
+app.get('/userdata/books/:bookId/pages', async (req, res) => {
+  const { bookId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const result = await dynamo.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: "userId = :uid AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: {
+        ":uid": userId,
+        ":prefix": `BOOK#${bookId}#PAGE#`
+      }
+    }));
+
+    res.json({ pages: result.Items || [] });
+
+  } catch (err) {
+    console.error("List Pages Error:", err);
+    res.status(500).json({ error: "Failed to fetch pages" });
+  }
+});
+
+
+
+
+
+///////////////////////////////////////////////////////////
+// 🔹 POST /userdata/books/:bookId/pages/:pageNumber/words
+app.post('/userdata/books/:bookId/pages/:pageNumber/words', async (req, res) => {
+  const { bookId, pageNumber } = req.params;
+  const { words } = req.body;
+  const userId = req.user.id;
+
+  if (!words || !Array.isArray(words)) {
+    return res.status(400).json({ error: "words[] required" });
+  }
+
+  try {
+    const saves = words.map(w => {
+      const sk = `BOOK#${bookId}#PAGE#${pageNumber}#WORD#${w.word}`;
+
+      return dynamo.send(new PutCommand({
+        TableName: TABLE_NAME,
+        Item: {
+          userId,
+          sk,
+          entityType: "WORD",
+          bookId,
+          pageNumber,
+          word: w.word,
+          meaning: w.meaning,
+          example: w.example,
+          createdAt: Date.now()
+        }
+      }));
+    });
+
+    await Promise.all(saves);
+
+    res.status(201).json({ message: "Words saved" });
+
+  } catch (err) {
+    console.error("Save Words Error:", err);
+    res.status(500).json({ error: "Failed to save words" });
+  }
+});
+
 
 // 🔹 GET /words: Fetch ALL words for the user
 app.get('/userdata/words', async (req, res) => {
